@@ -1,0 +1,92 @@
+//top module
+`timescale 1ns / 1ps
+
+module top_module(
+    input  logic       MAX10_CLK1_50,
+    input  logic [9:0] SW,
+    output logic [9:0] LEDR,
+    output logic [6:0] HEX0
+);
+
+    // --- Slow Sampling Tick (20 Hz) ---
+    localparam TICK_MAX = 50_000_000 / 20;
+    logic [21:0] tick_counter = 0;
+    logic sample_tick = 0;
+
+    always_ff @(posedge MAX10_CLK1_50) begin
+        if (tick_counter == TICK_MAX - 1) begin
+            tick_counter <= 0;
+            sample_tick  <= 1;
+        end else begin
+            tick_counter <= tick_counter + 1;
+            sample_tick  <= 0;
+        end
+    end
+
+    // --- Address Counter ---
+    logic [9:0] addr = 0;
+
+    always_ff @(posedge MAX10_CLK1_50) begin
+        if (sample_tick)
+            addr <= (addr == 1023) ? 0 : addr + 1;
+    end
+
+    // --- INPUT RAM (MIF LOADED) ---
+    logic [9:0] raw_noisy_signal;
+
+    v3 input_ram (
+        .address(addr),
+        .clock(MAX10_CLK1_50),
+        .data(10'd0),
+        .wren(1'b0),
+        .q(raw_noisy_signal)
+    );
+
+    // --- EMA FILTER ---
+    logic [9:0] filtered_signal;
+    logic valid_out;
+    logic [3:0] current_shift;
+
+    always_comb begin
+        case (SW[2:1])
+            2'b00: current_shift = 2;
+            2'b01: current_shift = 4;
+            2'b10: current_shift = 6;
+            2'b11: current_shift = 8;
+            default: current_shift = 4;
+        endcase
+    end
+
+    ema_low_pass_filter lpf_inst (
+        .clk(MAX10_CLK1_50),
+        .rst_n(1'b1),
+        .valid_in(sample_tick),
+        .shift_selector(current_shift),
+        .data_in(raw_noisy_signal),
+        .data_out(filtered_signal),
+        .valid_out(valid_out)
+    );
+
+    // --- DISPLAY FILTER STRENGTH ---
+    hex_decoder display0 (
+        .bin_in(current_shift),
+        .hex_out(HEX0)
+    );
+
+    // --- LED DISPLAY ---
+
+    // RAW signal (upper LEDs)
+    assign LEDR[9] = (raw_noisy_signal > 900);
+    assign LEDR[8] = (raw_noisy_signal > 700);
+    assign LEDR[7] = (raw_noisy_signal > 500);
+    assign LEDR[6] = (raw_noisy_signal > 300);
+    assign LEDR[5] = (raw_noisy_signal > 100);
+
+    // FILTERED signal (lower LEDs)
+    assign LEDR[4] = (filtered_signal > 900);
+    assign LEDR[3] = (filtered_signal > 700);
+    assign LEDR[2] = (filtered_signal > 500);
+    assign LEDR[1] = (filtered_signal > 300);
+    assign LEDR[0] = (filtered_signal > 100);
+
+endmodule

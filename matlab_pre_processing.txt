@@ -1,0 +1,70 @@
+//matlab pre processing code 
+
+clc;
+clear;
+
+% ================= USER SETTINGS =================
+input_file  = 'handel_hex.txt';   % original hex signal
+output_file = 'noisy_input.mif';  % noisy MIF for FPGA
+
+WIDTH = 10;     % FPGA data width
+DEPTH = 1024;   % memory depth (IMPORTANT)
+
+noise_power = 0.2;
+% =================================================
+
+%% ================= READ HEX FILE =================
+fid = fopen(input_file, 'r');
+data = textscan(fid, '%s');
+fclose(fid);
+
+hex_values = data{1};
+
+% Convert hex → decimal
+clean_signal = hex2dec(hex_values);
+clean_signal = double(clean_signal);
+
+%% ================= ADD NOISE =================
+noise = noise_power * randn(size(clean_signal));
+noisy_signal = clean_signal + noise;
+
+%% ================= NORMALIZE TO 10-BIT =================
+noisy_signal = noisy_signal - min(noisy_signal);
+noisy_signal = noisy_signal / max(noisy_signal);
+
+noisy_signal = round(noisy_signal * (2^WIDTH - 1));
+
+% Clip values
+noisy_signal(noisy_signal < 0) = 0;
+noisy_signal(noisy_signal > (2^WIDTH - 1)) = (2^WIDTH - 1);
+
+%% ================= TRUNCATION FIX (IMPORTANT) =================
+% Keep ONLY first 1024 samples
+if length(noisy_signal) < DEPTH
+    % pad with zeros if smaller
+    noisy_signal = [noisy_signal; zeros(DEPTH - length(noisy_signal), 1)];
+else
+    % truncate if larger
+    noisy_signal = noisy_signal(1:DEPTH);
+end
+
+%% ================= WRITE MIF FILE =================
+fid = fopen(output_file, 'w');
+
+fprintf(fid, 'WIDTH=%d;\n', WIDTH);
+fprintf(fid, 'DEPTH=%d;\n\n', DEPTH);
+fprintf(fid, 'ADDRESS_RADIX=UNS;\n');
+fprintf(fid, 'DATA_RADIX=DEC;\n\n');
+fprintf(fid, 'CONTENT BEGIN\n');
+
+% Write exactly 0 → 1023 entries (SAFE)
+for i = 1:DEPTH
+    fprintf(fid, '%d : %d;\n', i-1, noisy_signal(i));
+end
+
+fprintf(fid, 'END;\n');
+fclose(fid);
+
+%% ================= DONE =================
+disp('Noisy MIF file generated successfully (SAFE 1024-depth)');
+disp(['Noise power used: ', num2str(noise_power)]);

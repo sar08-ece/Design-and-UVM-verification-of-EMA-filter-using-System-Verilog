@@ -1,0 +1,300 @@
+`include "uvm_macros.svh"
+import uvm_pkg::*;
+
+// ================= INTERFACE =================
+interface ema_if(input logic clk);
+    logic rst_n;
+    logic valid_in;
+    logic signed [7:0] data_in;
+    logic [3:0] shift;
+    logic valid_out;
+    logic signed [7:0] data_out;
+endinterface
+
+
+// ================= SEQUENCE ITEM =================
+class ema_item extends uvm_sequence_item;
+
+    rand bit signed [7:0] data_in;
+    rand bit [3:0] shift;
+
+    bit signed [7:0] data_out;
+    bit valid_out;
+
+    `uvm_object_utils(ema_item)
+
+    function new(string name="ema_item");
+        super.new(name);
+    endfunction
+endclass
+
+
+// ================= SEQUENCE =================
+class ema_seq extends uvm_sequence #(ema_item);
+    `uvm_object_utils(ema_seq)
+
+    function new(string name="ema_seq");
+        super.new(name);
+    endfunction
+
+    task body();
+        ema_item item;
+        repeat(30) begin
+            item = ema_item::type_id::create("item");
+            start_item(item);
+            assert(item.randomize());
+            finish_item(item);
+        end
+    endtask
+endclass
+
+
+// ================= DRIVER =================
+class ema_driver extends uvm_driver #(ema_item);
+    `uvm_component_utils(ema_driver)
+
+    virtual ema_if vif;
+
+    function new(string name, uvm_component parent);
+        super.new(name,parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        if(!uvm_config_db #(virtual ema_if)::get(this,"","vif",vif))
+            `uvm_fatal("DRV","No VIF")
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        forever begin
+            seq_item_port.get_next_item(req);
+
+            @(posedge vif.clk);
+            vif.valid_in <= 1;
+            vif.data_in  <= req.data_in;
+            vif.shift    <= req.shift;
+
+            @(posedge vif.clk);
+            vif.valid_in <= 0;
+
+            seq_item_port.item_done();
+        end
+    endtask
+endclass
+
+
+// ================= MONITOR =================
+class ema_monitor extends uvm_monitor;
+    `uvm_component_utils(ema_monitor)
+
+    virtual ema_if vif;
+    uvm_analysis_port #(ema_item) ap;
+
+    function new(string name, uvm_component parent);
+        super.new(name,parent);
+        ap = new("ap",this);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        if(!uvm_config_db #(virtual ema_if)::get(this,"","vif",vif))
+            `uvm_fatal("MON","No VIF")
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        ema_item item;
+
+        forever begin
+            @(posedge vif.clk);
+
+            if(vif.valid_out) begin
+                item = ema_item::type_id::create("item");
+                item.data_in  = vif.data_in;
+                item.shift    = vif.shift;
+                item.data_out = vif.data_out;
+                item.valid_out = vif.valid_out;
+                ap.write(item);
+            end
+        end
+    endtask
+endclass
+
+
+// ================= SCOREBOARD =================
+class ema_scoreboard extends uvm_scoreboard;
+    `uvm_component_utils(ema_scoreboard)
+
+    uvm_analysis_imp #(ema_item, ema_scoreboard) imp;
+
+    int pass=0, fail=0;
+
+    logic signed [19:0] acc; // match DUT
+
+    function new(string name, uvm_component parent);
+        super.new(name,parent);
+        imp = new("imp",this);
+        acc = 0;
+    endfunction
+
+    function void write(ema_item item);
+
+        logic signed [19:0] temp;
+        logic signed [7:0] expected;
+
+        // compute using OLD acc
+        temp = acc >>> item.shift;
+        expected = temp[7:0]; // truncate like DUT
+
+        if(item.data_out === expected) begin
+            `uvm_info("SB",$sformatf("PASS dout=%0h expected=%0h",item.data_out,expected),UVM_LOW)
+            pass++;
+        end else begin
+            `uvm_error("SB",$sformatf("FAIL dout=%0h expected=%0h",item.data_out,expected))
+            fail++;
+        end
+
+        // update AFTER compare
+        acc = acc + item.data_in - (acc >>> item.shift);
+
+    endfunction
+
+    function void report_phase(uvm_phase phase);
+        `uvm_info("SB",$sformatf("FINAL PASS=%0d FAIL=%0d",pass,fail),UVM_NONE)
+    endfunction
+endclass
+
+
+// ================= AGENT =================
+class ema_agent extends uvm_agent;
+    `uvm_component_utils(ema_agent)
+
+    ema_driver drv;
+    ema_monitor mon;
+    uvm_sequencer #(ema_item) seqr;
+
+    function new(string name, uvm_component parent);
+        super.new(name,parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        drv  = ema_driver::type_id::create("drv",this);
+        mon  = ema_monitor::type_id::create("mon",this);
+        seqr = uvm_sequencer #(ema_item)::type_id::create("seqr",this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        drv.seq_item_port.connect(seqr.seq_item_export);
+    endfunction
+endclass
+
+
+// ================= ENV =================
+class ema_env extends uvm_env;
+    `uvm_component_utils(ema_env)
+
+    ema_agent agent;
+    ema_scoreboard sb;
+
+    function new(string name, uvm_component parent);
+        super.new(name,parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        agent = ema_agent::type_id::create("agent",this);
+        sb    = ema_scoreboard::type_id::create("sb",this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        agent.mon.ap.connect(sb.imp);
+    endfunction
+endclass
+
+
+// ================= TEST =================
+class ema_test extends uvm_test;
+    `uvm_component_utils(ema_test)
+
+    ema_env env;
+
+    function new(string name, uvm_component parent);
+        super.new(name,parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        env = ema_env::type_id::create("env",this);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        ema_seq seq;
+
+        phase.raise_objection(this);
+
+        seq = ema_seq::type_id::create("seq");
+        seq.start(env.agent.seqr);
+
+        #1000;
+        phase.drop_objection(this);
+    endtask
+endclass
+
+
+// ================= TOP =================
+module tb;
+
+    logic clk=0;
+    always #5 clk = ~clk;
+
+    ema_if vif(clk);
+
+    ema_low_pass_filter dut (
+        .clk(clk),
+        .rst_n(vif.rst_n),
+        .valid_in(vif.valid_in),
+        .shift(vif.shift),
+        .data_in(vif.data_in),
+        .valid_out(vif.valid_out),
+        .data_out(vif.data_out)
+    );
+
+    initial begin
+        vif.rst_n = 0;
+        #20;
+        vif.rst_n = 1;
+    end
+
+    initial begin
+        uvm_config_db #(virtual ema_if)::set(null,"*","vif",vif);
+        run_test("ema_test");
+    end
+
+endmodule
+
+//DUT
+module ema_low_pass_filter #(
+    parameter DATA_WIDTH = 8
+)(
+    input  logic clk,
+    input  logic rst_n,
+    input  logic valid_in,
+    input  logic [3:0] shift,
+    input  logic signed [DATA_WIDTH-1:0] data_in,
+    output logic valid_out,
+    output logic signed [DATA_WIDTH-1:0] data_out
+);
+
+    logic signed [19:0] acc;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            acc       <= 0;
+            data_out  <= 0;
+            valid_out <= 0;
+        end else begin
+            valid_out <= valid_in;
+
+            if (valid_in) begin
+                acc      <= acc + data_in - (acc >>> shift);
+                data_out <= acc >>> shift; // uses OLD acc
+            end
+        end
+    end
+
+endmodule

@@ -1,0 +1,134 @@
+//matlab post processing code
+
+clc;
+clear;
+close all;
+
+%% ================= SETTINGS =================
+hex_input_file  = 'handel_hex.txt';   % original clean signal
+fpga_hex_file   = 'da2_output.hex';       % FPGA output (Intel HEX)
+WIDTH = 10;
+DEPTH = 1024;
+
+%% ================= READ CLEAN SIGNAL =================
+fid = fopen(hex_input_file, 'r');
+data = textscan(fid, '%s');
+fclose(fid);
+
+hex_values = data{1};
+clean_signal = double(hex2dec(hex_values));
+
+% Match FPGA preprocessing
+ref = clean_signal;
+
+ref = ref - min(ref);
+ref = ref / max(ref);
+ref = round(ref * (2^WIDTH - 1));
+
+% Truncate/pad to 1024
+if length(ref) < DEPTH
+    ref = [ref; zeros(DEPTH - length(ref),1)];
+else
+    ref = ref(1:DEPTH);
+end
+
+ref = double(ref(:));
+
+%% ================= READ FPGA HEX OUTPUT =================
+fid = fopen(fpga_hex_file, 'r');
+
+if fid == -1
+    error('FPGA output file not found!');
+end
+
+data_vals = [];
+
+while ~feof(fid)
+    line = fgetl(fid);
+
+    if line(1) ~= ':'
+        continue;
+    end
+
+    byte_count = hex2dec(line(2:3));
+    record_type = hex2dec(line(8:9));
+
+    if record_type == 0
+        data_field = line(10:9 + 2*byte_count);
+
+        % 🔥 IMPORTANT: combine 2 bytes (16-bit storage assumed)
+        for i = 1:4:length(data_field)
+            if (i+3) <= length(data_field)
+                byte1 = data_field(i:i+1);
+                byte2 = data_field(i+2:i+3);
+
+                val = hex2dec([byte1 byte2]);  % 16-bit value
+
+                data_vals(end+1) = val;
+            end
+        end
+    end
+end
+
+fclose(fid);
+
+fpga_out = double(data_vals(:));
+
+% Truncate to match
+min_len = min(length(ref), length(fpga_out));
+ref = ref(1:min_len);
+fpga_out = fpga_out(1:min_len);
+
+%% ================= AUTO ALIGN (VERY IMPORTANT) =================
+[c,lags] = xcorr(fpga_out, ref);
+[~,idx] = max(c);
+delay = lags(idx);
+
+if delay > 0
+    fpga_aligned = fpga_out(delay+1:end);
+    ref_aligned = ref(1:end-delay);
+else
+    ref_aligned = ref(-delay+1:end);
+    fpga_aligned = fpga_out(1:end+delay);
+end
+
+%% ================= PLOTS =================
+figure;
+plot(ref_aligned, 'b'); hold on;
+plot(fpga_aligned, 'r--');
+legend('Reference','FPGA Output');
+title('Signal Comparison (Aligned)');
+grid on;
+
+figure;
+error_signal = ref_aligned - fpga_aligned;
+plot(error_signal);
+title('Error Signal');
+grid on;
+
+%% ================= METRICS =================
+snr_val = 10*log10(sum(ref_aligned.^2) / sum(error_signal.^2));
+
+mse_val = mean(error_signal.^2);
+rmse_val = sqrt(mse_val);
+mae_val = mean(abs(error_signal));
+max_err = max(abs(error_signal));
+
+error_rate = sum(ref_aligned ~= round(fpga_aligned)) / length(ref_aligned);
+
+corr_val = corr(ref_aligned, fpga_aligned);
+
+peak_val = max(ref_aligned);
+psnr_val = 10*log10((peak_val^2)/mse_val);
+
+%% ================= DISPLAY =================
+fprintf('\n===== FINAL VALIDATION RESULTS =====\n');
+fprintf('SNR        : %.2f dB\n', snr_val);
+fprintf('MSE        : %.4f\n', mse_val);
+fprintf('RMSE       : %.4f\n', rmse_val);
+fprintf('MAE        : %.4f\n', mae_val);
+fprintf('Max Error  : %.4f\n', max_err);
+fprintf('Error Rate : %.6f\n', error_rate);
+fprintf('Correlation: %.4f\n', corr_val);
+fprintf('PSNR       : %.2f dB\n', psnr_val);
+fprintf('Detected Delay: %d samples\n', delay)
